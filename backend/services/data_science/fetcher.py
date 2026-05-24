@@ -37,13 +37,51 @@ def fetch_prices(tickers: List[str], period: str = "3y") -> pd.DataFrame:
     df = pd.concat(frames.values(), axis=1)
     df.index = pd.to_datetime(df.index).tz_localize(None)  # 移除時區
 
-    # 向前填補（最多 3 天），避免跨市場假日造成大量 NaN
+    # ── 1. 缺失值處理 (Missing Value Handling) ──────────────────────────
+    # 向前填補最多 3 天（跨市場假日、停牌）
     df = df.ffill(limit=3)
-
-    # 移除超過半數欄位都是 NaN 的列（通常是節日）
+    # 移除超過半數欄位仍為 NaN 的列
     df = df.dropna(thresh=max(1, len(df.columns) // 2))
 
+    # ── 2. 重複值處理 (Duplicate Removal) ──────────────────────────────
+    df = df[~df.index.duplicated(keep="last")]
+
     return df.sort_index()
+
+
+def remove_outliers_iqr(returns: pd.DataFrame, k: float = 5.0) -> pd.DataFrame:
+    """
+    異常值處理 (Outlier Handling) — IQR 截斷法
+
+    金融報酬率中，極端值（如熔斷、閃崩）可能干擾模型訓練。
+    使用 IQR（四分位距）方法：
+      下界 = Q1 - k * IQR
+      上界 = Q3 + k * IQR
+    超出範圍的值用邊界值替換（Winsorize），而非直接刪除。
+    k=5 比 k=1.5 寬鬆，保留更多金融極端事件但移除明顯錯誤資料。
+
+    注意：只在訓練集計算 Q1/Q3，測試集使用相同邊界 → 防止洩漏。
+    """
+    result = returns.copy()
+    bounds = {}  # 儲存每欄的邊界（供測試集使用）
+
+    for col in result.columns:
+        q1 = result[col].quantile(0.25)
+        q3 = result[col].quantile(0.75)
+        iqr = q3 - q1
+        lower = q1 - k * iqr
+        upper = q3 + k * iqr
+        bounds[col] = (lower, upper)
+
+        n_before = result[col].isna().sum()
+        result[col] = result[col].clip(lower=lower, upper=upper)
+        n_clipped = ((returns[col] < lower) | (returns[col] > upper)).sum()
+
+        if n_clipped > 0:
+            print(f"  [Outlier] {col}: 截斷 {n_clipped} 個異常值 "
+                  f"(範圍: [{lower:.4f}, {upper:.4f}])")
+
+    return result, bounds
 
 
 def compute_log_returns(prices: pd.DataFrame) -> pd.DataFrame:
